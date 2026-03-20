@@ -1,0 +1,14 @@
+services:
+  driving-monitor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # Логи храним на хосте
+    volumes:
+      - ./logs:/app/logs
+      - ./app/:/app/
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
