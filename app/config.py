@@ -58,8 +58,9 @@ class Config:
     STUDENT_ID = int(_sid) if _sid else None
 
     # ── Уведомления через Leads API ────────────────────────────────────────────
+    # Если LEADS_API_KEY не задан или пустой — уведомления полностью отключены
     LEADS_API_URL = _get("LEADS_API_URL", "http://185.119.57.217/api/v1/leads/")
-    LEADS_API_KEY = _get("LEADS_API_KEY", required=True)
+    LEADS_API_KEY = _get("LEADS_API_KEY", "")   # пусто = уведомления выключены
     LEADS_NAME    = _get("LEADS_NAME",    "Монитор вождения")
 
     # ── Расписание поиска ──────────────────────────────────────────────────────
@@ -88,5 +89,6 @@ class Config:
     # Хабаровск = UTC+10 → timeshift = -600
     TIMESHIFT = int(_get("TIMESHIFT", "-600"))
 
-    DAILY_BOOK_LIMIT = int(_get("DAILY_BOOK_LIMIT", "1"))
-    STOP_AFTER_BOOK = _get("STOP_AFTER_BOOK", "false").lower() == "true"
+    DAILY_BOOK_LIMIT  = int(_get("DAILY_BOOK_LIMIT",  "1"))
+    WEEKLY_BOOK_LIMIT = int(_get("WEEKLY_BOOK_LIMIT", "0"))  # 0 = без ограничения
+    STOP_AFTER_BOOK   = _get("STOP_AFTER_BOOK", "false").lower() == "true"

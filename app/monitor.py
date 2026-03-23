@@ -46,6 +46,12 @@ def _save_bookings(data: dict):
     BOOKINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _week_key(d: date) -> str:
+    """Возвращает ключ недели в формате 'YYYY-Www' (ISO-неделя)."""
+    iso = d.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
 def get_bookings_today() -> int:
     """Возвращает количество записей за сегодняшний календарный день."""
     data = _load_bookings()
@@ -53,13 +59,27 @@ def get_bookings_today() -> int:
     return data.get(today, 0)
 
 
+def get_bookings_this_week() -> int:
+    """Возвращает количество записей за текущую ISO-неделю."""
+    data = _load_bookings()
+    week = _week_key(date.today())
+    return data.get(week, 0)
+
+
 def increment_bookings_today():
-    """Увеличивает счётчик записей за сегодня на 1."""
+    """Увеличивает счётчики записей за сегодня и за текущую неделю на 1."""
     data = _load_bookings()
     today = date.today().isoformat()
+    week  = _week_key(date.today())
+
     data[today] = data.get(today, 0) + 1
+    data[week]  = data.get(week,  0) + 1
+
     _save_bookings(data)
-    log.info("Счётчик записей за %s: %d", today, data[today])
+    log.info(
+        "Счётчик записей: сегодня %s → %d, неделя %s → %d",
+        today, data[today], week, data[week],
+    )
 
 
 # ── Сессия с сайтом ──────────────────────────────────────────────────────────
@@ -257,7 +277,7 @@ class DsControlClient:
         result = body.get("data")
         if result == "RESERVED":
             log.warning("Слот %s забронирован (RESERVED), не записан — нужна оплата", session_id)
-            notify_telegram(f"⚠️ Слот занят в бронь, но не записан (нет оплаты):\n{format_slot(slot)}")
+            notify_leads(f"⚠️ Слот занят в бронь, но не записан (нет оплаты):\n{format_slot(slot)}")
             return False
     
         log.info("Успешно записан на слот %s", session_id)
@@ -293,7 +313,11 @@ def is_slot_suitable(slot: dict) -> bool:
 
 
 # ── Уведомления через Leads API ───────────────────────────────────────────────
-def notify_telegram(message: str):
+def notify_leads(message: str):
+    """Отправляет уведомление через Leads API. Если ключ не задан — молча пропускает."""
+    if not Config.LEADS_API_KEY:
+        log.debug("Уведомления отключены (LEADS_API_KEY не задан): %s", message)
+        return
     try:
         r = requests.post(
             Config.LEADS_API_URL,
@@ -325,11 +349,15 @@ def main():
     session_ok = False
 
     log.info(
-        "Монитор запущен. Интервал: %d сек. Лимит записей в день: %d. "
-        "Остановка после записи: %s.",
+        "Монитор запущен. Интервал: %d сек. "
+        "Лимит записей: день=%d, неделя=%s. "
+        "Остановка после записи: %s. "
+        "Уведомления: %s.",
         Config.CHECK_INTERVAL,
         Config.DAILY_BOOK_LIMIT,
+        str(Config.WEEKLY_BOOK_LIMIT) if Config.WEEKLY_BOOK_LIMIT else "нет",
         Config.STOP_AFTER_BOOK,
+        "включены" if Config.LEADS_API_KEY else "отключены",
     )
 
     while True:
@@ -363,19 +391,29 @@ def main():
                     continue
 
                 if Config.AUTO_BOOK:
-                    # Проверяем дневной лимит перед каждой попыткой записи
+                    # Проверяем дневной лимит
                     bookings_today = get_bookings_today()
                     if bookings_today >= Config.DAILY_BOOK_LIMIT:
                         log.info(
                             "Дневной лимит записей достигнут (%d/%d), слот %s пропускаю",
                             bookings_today, Config.DAILY_BOOK_LIMIT, slot_id,
                         )
-                        continue  # продолжаем мониторить, но не записываемся
+                        continue
+
+                    # Проверяем недельный лимит (0 = отключён)
+                    if Config.WEEKLY_BOOK_LIMIT:
+                        bookings_week = get_bookings_this_week()
+                        if bookings_week >= Config.WEEKLY_BOOK_LIMIT:
+                            log.info(
+                                "Недельный лимит записей достигнут (%d/%d), слот %s пропускаю",
+                                bookings_week, Config.WEEKLY_BOOK_LIMIT, slot_id,
+                            )
+                            continue
 
                     success = client.book_slot(slot)
                     if success:
                         increment_bookings_today()
-                        notify_telegram(
+                        notify_leads(
                             f"✅ Записан на слот #{slot_id}!\n{format_slot(slot)}"
                         )
                         booked_ids.add(slot_id)
@@ -384,16 +422,18 @@ def main():
                             log.info("STOP_AFTER_BOOK=true — завершаю работу")
                             return
 
-                        # Проверяем лимит после успешной записи
+                        # Проверяем лимиты после успешной записи
                         if get_bookings_today() >= Config.DAILY_BOOK_LIMIT:
                             log.info("Дневной лимит записей исчерпан, жду следующего дня")
-                            break  # выходим из цикла по слотам, но не из while
+                            break
+                        if Config.WEEKLY_BOOK_LIMIT and get_bookings_this_week() >= Config.WEEKLY_BOOK_LIMIT:
+                            log.info("Недельный лимит записей исчерпан, жду следующей недели")
+                            break
                     else:
                         log.warning("Не удалось записаться на слот %s", slot_id)
                 else:
                     # AUTO_BOOK=false — только уведомляем
-                    msg = format_slot(slot)
-                    notify_telegram(msg)
+                    notify_leads(format_slot(slot))
                     booked_ids.add(slot_id)
 
         except requests.HTTPError as e:

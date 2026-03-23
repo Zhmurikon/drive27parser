@@ -117,6 +117,7 @@ docker-compose logs -f
 | `AUTO_BOOK` | Автозапись | `false` |
 | `TIMESHIFT` | Сдвиг часового пояса в минутах | `-600` |
 | `DAILY_BOOK_LIMIT` | Лимит записей в день | `1` |
+| `WEEKLY_BOOK_LIMIT` | Лимит записей в неделю (0 = нет ограничений) | `0` |
 | `STOP_AFTER_BOOK` | Стоп после записи | `false` |
 | `SLOT_MONDAY` … `SLOT_SUNDAY` | Расписание поиска | `No` |
 
