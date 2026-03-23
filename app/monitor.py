@@ -15,6 +15,7 @@ import requests
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from config import Config
+import re
 
 # ── Логирование ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -68,6 +69,7 @@ class DsControlClient:
     def __init__(self):
         self.session = requests.Session()
         self._set_headers()
+        self._csrf_form_token = None
 
     def _set_headers(self):
         self.session.headers.update(
@@ -120,10 +122,26 @@ class DsControlClient:
         if data.get("success"):
             log.info("Авторизация успешна")
             self._fetch_student_id()
+            self._csrf_form_token = self._fetch_csrf_form_token()
             return True
         else:
             log.error("Ошибка авторизации: %s", data.get("data"))
             return False
+
+    def _fetch_csrf_form_token(self) -> str:
+        """Получает парный CSRF токен из HTML страницы (input hidden)."""
+        r = self.session.get(self.BASE + "/#!/sapp/sapp.studentcalendar", timeout=15)
+        r.raise_for_status()
+        match = re.search(
+            r'<input[^>]+name="__RequestVerificationToken"[^>]+value="([^"]+)"',
+            r.text
+        )
+        if match:
+            token = match.group(1)
+            log.info("Form CSRF token получен: %s...", token[:20])
+            return token
+        log.error("Токен не найден в HTML. Начало страницы: %s", r.text[:500])
+        raise RuntimeError("Не удалось найти __RequestVerificationToken в HTML")
 
     def _fetch_student_id(self):
         if Config.STUDENT_ID:
@@ -183,30 +201,65 @@ class DsControlClient:
         if not session_id:
             log.error("book_slot: нет Id в слоте: %s", slot)
             return False
-
-        csrf = self.session.cookies.get("__RequestVerificationToken", "")
+    
+        # Если токен не получен — попробуем получить сейчас
+        if not self._csrf_form_token:
+            log.warning("CSRF токен не был получен при логине, запрашиваю сейчас")
+            self._csrf_form_token = self._fetch_csrf_form_token()
+    
+        csrf_cookie = self.session.cookies.get("__RequestVerificationToken", "")
+        csrf_form = self._csrf_form_token
         payload = {"SessionId": session_id}
-        log.info("Отправляю запись на слот %s", session_id)
-
+        url = self.BASE + "/api/MobileSigninSessionV2"
+    
+        log.info("=== BOOK SLOT REQUEST ===")
+        log.info("URL:              %s", url)
+        log.info("Payload:          %s", json.dumps(payload))
+        log.info("Cookie CSRF:      %s...", csrf_cookie[:20])
+        log.info("Header CSRF:      %s...", csrf_form[:20])
+        log.info("Токены совпадают: %s", csrf_cookie == csrf_form)
+        log.info("========================")
+    
         r = self.session.post(
-            self.BASE + "/api/MobileSigninSessionV2",
+            url,
             json=payload,
-            headers={"__RequestVerificationToken": csrf},
+            headers={"__RequestVerificationToken": csrf_form},
             timeout=15,
         )
+    
+        log.info("=== BOOK SLOT RESPONSE ===")
+        log.info("Status:   %s %s", r.status_code, r.reason)
+        log.info("Raw body: %s", r.text[:500])
+        log.info("==========================")
+    
+        # Токен протух — переполучаем и пробуем ещё раз
+        if r.status_code == 500 and "Неверный токен" in r.text:
+            log.warning("Токен защиты устарел, обновляю и повторяю запрос")
+            self._csrf_form_token = self._fetch_csrf_form_token()
+            r = self.session.post(
+                url,
+                json=payload,
+                headers={"__RequestVerificationToken": self._csrf_form_token},
+                timeout=15,
+            )
+            log.info("=== RETRY RESPONSE ===")
+            log.info("Status:   %s %s", r.status_code, r.reason)
+            log.info("Raw body: %s", r.text[:500])
+            log.info("======================")
+    
         r.raise_for_status()
         body = r.json()
-
+    
         if not body.get("success"):
             log.warning("MobileSigninSessionV2 вернул ошибку: %s", body)
             return False
-
+    
         result = body.get("data")
         if result == "RESERVED":
             log.warning("Слот %s забронирован (RESERVED), не записан — нужна оплата", session_id)
             notify_telegram(f"⚠️ Слот занят в бронь, но не записан (нет оплаты):\n{format_slot(slot)}")
             return False
-
+    
         log.info("Успешно записан на слот %s", session_id)
         return True
 
