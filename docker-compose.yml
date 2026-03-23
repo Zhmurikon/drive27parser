@@ -1,7 +1,7 @@
 services:
   driving-monitor:
     build: .
-    #restart: unless-stopped
+    restart: unless-stopped
     env_file: .env
     # Логи храним на хосте
     volumes:
